@@ -385,49 +385,66 @@
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     
     // ---------- Data Initialization with photo migration ----------
-    let users = JSON.parse(localStorage.getItem('users')) || [
-        { id: 1, username: 'admin', password: '4141', visiblePassword: '4141', role: 'admin', firstName: 'Admin', lastName: '' },
-        { id: 2, username: 'eval1', password: 'pass', visiblePassword: 'pass', role: 'evaluator', firstName: 'Eva', lastName: 'Lator' },
-        { id: 3, username: 'student1', password: 'pass', visiblePassword: 'pass', role: 'student', firstName: 'Stud', lastName: 'Ent' }
-    ];
-    let students = JSON.parse(localStorage.getItem('students')) || [
-        { id: 1, userId: 3, studentId: 'S001', cohort: '2024' }
-    ];
-    // Migrate existing students: add photo field if missing
-    students = students.map(s => ({ ...s, photo: s.photo || null }));
-
-    let evaluators = JSON.parse(localStorage.getItem('evaluators')) || [
-        { id: 1, userId: 2, title: 'Dr.', department: 'OBGYN' }
-    ];
-    let dopsEvals = JSON.parse(localStorage.getItem('dopsEvals')) || [];
-    let monthlyEvals = JSON.parse(localStorage.getItem('monthlyEvals')) || [];
-    let presentationEvals = JSON.parse(localStorage.getItem('presentationEvals')) || [];
-    let attendanceData = JSON.parse(localStorage.getItem('attendanceData')) || [];
-    let finalGrades = JSON.parse(localStorage.getItem('finalGrades')) || [];
-
-    function saveAll() {
-        localStorage.setItem('users', JSON.stringify(users));
-        localStorage.setItem('students', JSON.stringify(students));
-        localStorage.setItem('evaluators', JSON.stringify(evaluators));
-        localStorage.setItem('dopsEvals', JSON.stringify(dopsEvals));
-        localStorage.setItem('monthlyEvals', JSON.stringify(monthlyEvals));
-        localStorage.setItem('presentationEvals', JSON.stringify(presentationEvals));
-        localStorage.setItem('attendanceData', JSON.stringify(attendanceData));
-        localStorage.setItem('finalGrades', JSON.stringify(finalGrades));
-    }
+        // ---------- Data Arrays ----------
+    let users = [];
+    let students = [];
+    let evaluators = [];
+    let dopsEvals = [];
+    let monthlyEvals = [];
+    let presentationEvals = [];
+    let attendanceData = [];
+    let finalGrades = [];
 
     let currentUser = null;
 
-    // Login / Logout
-    document.getElementById('loginBtn').addEventListener('click', () => {
+    // ---------- Load all data from Supabase ----------
+    async function loadAllData() {
+        const { data: u } = await supabaseClient.from('users').select('*');
+        users = u || [];
+
+        const { data: s } = await supabaseClient.from('students').select('*');
+        students = (s || []).map(st => ({ ...st, photo: st.photo || null }));
+
+        const { data: e } = await supabaseClient.from('evaluators').select('*');
+        evaluators = e || [];
+
+        const { data: d } = await supabaseClient.from('dopsEvals').select('*');
+        dopsEvals = d || [];
+
+        const { data: m } = await supabaseClient.from('monthlyEvals').select('*');
+        monthlyEvals = m || [];
+
+        const { data: p } = await supabaseClient.from('presentationEvals').select('*');
+        presentationEvals = p || [];
+
+        const { data: a } = await supabaseClient.from('attendanceData').select('*');
+        attendanceData = a || [];
+
+        const { data: f } = await supabaseClient.from('finalGrades').select('*');
+        finalGrades = f || [];
+
+        if (currentUser) showSectionForRole();
+    }
+
+    // ---------- Login ----------
+    document.getElementById('loginBtn').addEventListener('click', async () => {
         const username = document.getElementById('loginUsername').value;
         const password = document.getElementById('loginPassword').value;
         const role = document.getElementById('loginRole').value;
-        const user = users.find(u => u.username === username && u.password === password && u.role === role);
-        if (user) {
-            currentUser = user;
-            document.getElementById('currentUser').innerText = `${user.firstName} ${user.lastName} (${user.role})`;
+
+        const { data, error } = await supabaseClient
+            .from('users')
+            .select('*')
+            .eq('username', username)
+            .eq('password', password)
+            .eq('role', role)
+            .single();
+
+        if (data) {
+            currentUser = data;
+            document.getElementById('currentUser').innerText = `${data.firstName || data.username} ${data.lastName || ''} (${data.role})`;
             document.getElementById('logoutBtn').classList.remove('hidden');
+            await loadAllData();
             showSectionForRole();
         } else {
             alert('Invalid credentials');
@@ -482,8 +499,8 @@
         });
     });
 
-    // Users table with photo upload
-    function loadUsersTable() {
+    // Users table
+    async function loadUsersTable() {
         const tbody = document.getElementById('userTableBody');
         tbody.innerHTML = '';
         users.forEach(u => {
@@ -498,7 +515,6 @@
             if (u.role === 'student') {
                 const studentRec = students.find(s => s.userId === u.id);
                 if (studentRec) {
-                    // show thumbnail if photo exists
                     if (studentRec.photo) {
                         const img = document.createElement('img');
                         img.src = studentRec.photo;
@@ -511,22 +527,37 @@
                         span.className = 'text-xs text-gray-400';
                         photoCell.appendChild(span);
                     }
-                    // file input for upload
+                    
                     const fileInput = document.createElement('input');
                     fileInput.type = 'file';
                     fileInput.accept = 'image/*';
                     fileInput.className = 'text-xs mt-1';
-                    fileInput.onchange = (e) => {
+                    fileInput.onchange = async (e) => {
                         const file = e.target.files[0];
-                        if (file) {
-                            const reader = new FileReader();
-                            reader.onload = (ev) => {
-                                studentRec.photo = ev.target.result; // base64
-                                saveAll();
-                                loadUsersTable(); // refresh to show thumbnail
-                            };
-                            reader.readAsDataURL(file);
+                        if (!file) return;
+
+                        const fileName = `student-${studentRec.userId}-${Date.now()}.jpg`;
+                        const { error: uploadError } = await supabaseClient.storage
+                            .from('student-photos')
+                            .upload(fileName, file);
+
+                        if (uploadError) {
+                            alert('Upload failed: ' + uploadError.message);
+                            return;
                         }
+
+                        const { data: urlData } = supabaseClient.storage
+                            .from('student-photos')
+                            .getPublicUrl(fileName);
+                        const publicUrl = urlData.publicUrl;
+
+                        await supabaseClient
+                            .from('students')
+                            .update({ photo: publicUrl })
+                            .eq('id', studentRec.id);
+
+                        await loadAllData();
+                        loadUsersTable();
                     };
                     photoCell.appendChild(fileInput);
                 } else {
@@ -539,39 +570,61 @@
             const delBtn = document.createElement('button');
             delBtn.innerText = 'Delete';
             delBtn.className = 'bg-red-500 text-white px-2 py-1 rounded text-xs';
-            delBtn.onclick = () => deleteUser(u.id);
+            delBtn.onclick = async () => {
+                if (u.id === currentUser?.id) { alert("Cannot delete yourself"); return; }
+                await supabaseClient.from('users').delete().eq('id', u.id);
+                await loadAllData();
+                loadUsersTable();
+            };
             row.insertCell().appendChild(delBtn);
         });
     }
 
-    window.deleteUser = (userId) => {
-        if (userId === currentUser?.id) { alert("Cannot delete yourself"); return; }
-        users = users.filter(u => u.id !== userId);
-        students = students.filter(s => s.userId !== userId);
-        evaluators = evaluators.filter(e => e.userId !== userId);
-        attendanceData.forEach(day => delete day.records[students.find(s => s.userId === userId)?.id]);
-        finalGrades = finalGrades.filter(f => f.studentId !== students.find(s => s.userId === userId)?.id);
-        saveAll();
-        loadUsersTable();
-    };
-
-    document.getElementById('addUserBtn').addEventListener('click', () => {
+    // Add user
+    document.getElementById('addUserBtn').addEventListener('click', async () => {
         const username = document.getElementById('newUsername').value.trim();
         const password = document.getElementById('newPassword').value;
         const role = document.getElementById('newRole').value;
         if (!username || !password) { alert('Name and password required'); return; }
-        const newId = users.length ? Math.max(...users.map(u=>u.id)) + 1 : 1;
-        const newUser = { id: newId, username, password, visiblePassword: password, role, firstName: username, lastName: '' };
-        users.push(newUser);
+
+        const { data: userData, error: userError } = await supabaseClient
+            .from('users')
+            .insert([{
+                username,
+                password,
+                visiblePassword: password,
+                role,
+                firstName: username,
+                lastName: ''
+            }])
+            .select();
+
+        if (userError) { alert('Error adding user: ' + userError.message); return; }
+
+        const newUser = userData[0];
+
         if (role === 'student') {
-            const newStudent = { id: students.length + 1, userId: newId, studentId: `STU${newId}`, cohort: '', photo: null };
-            students.push(newStudent);
-            finalGrades.push({ studentId: newStudent.id, examScore: 0, committeePoints: 0 });
-            attendanceData.forEach(day => { day.records[newStudent.id] = 'NA'; });
+            await supabaseClient.from('students').insert([{
+                userId: newUser.id,
+                studentId: `STU${newUser.id}`,
+                cohort: '',
+                photo: null
+            }]);
+            
+            await supabaseClient.from('finalGrades').insert([{
+                studentId: newUser.id,
+                examScore: 0,
+                committeePoints: 0
+            }]);
         } else if (role === 'evaluator') {
-            evaluators.push({ id: evaluators.length + 1, userId: newId, title: '', department: '' });
+            await supabaseClient.from('evaluators').insert([{
+                userId: newUser.id,
+                title: '',
+                department: ''
+            }]);
         }
-        saveAll();
+
+        await loadAllData();
         loadUsersTable();
         document.getElementById('newUsername').value = '';
         document.getElementById('newPassword').value = '';
@@ -615,7 +668,7 @@
         });
     }
 
-    // ---------- Attendance Matrix ----------
+    // Attendance Matrix
     function loadAttendanceMatrix() {
         const header = document.getElementById('attendanceMatrixHeader');
         const tbody = document.getElementById('attendanceMatrixBody');
@@ -641,9 +694,9 @@
         tbody.innerHTML = bodyHtml;
     }
 
-    window.removeAttendanceDate = (date) => {
-        attendanceData = attendanceData.filter(d => d.date !== date);
-        saveAll();
+    window.removeAttendanceDate = async (date) => {
+        await supabaseClient.from('attendanceData').delete().eq('date', date);
+        await loadAllData();
         loadAttendanceMatrix();
     };
 
@@ -660,38 +713,57 @@
         return dates;
     }
 
-    document.getElementById('addMonthBtn').addEventListener('click', () => {
+    document.getElementById('addMonthBtn').addEventListener('click', async () => {
         const monthStr = document.getElementById('attendanceMonth').value;
         if (!monthStr) { alert('Select a month'); return; }
         const [year, month] = monthStr.split('-').map(Number);
         const dates = getDatesInMonth(year, month-1);
         let added = 0;
-        dates.forEach(date => {
-            if (!attendanceData.some(d => d.date === date)) {
-                const newDay = { date, records: {} };
-                students.forEach(s => { newDay.records[s.id] = 'NA'; });
-                attendanceData.push(newDay);
+        for (const date of dates) {
+            const exists = attendanceData.some(d => d.date === date);
+            if (!exists) {
+                const records = {};
+                students.forEach(s => { records[s.id] = 'NA'; });
+                await supabaseClient.from('attendanceData').insert([{ date, records }]);
                 added++;
             }
-        });
-        if (added > 0) { saveAll(); loadAttendanceMatrix(); alert(`Added ${added} days for ${monthStr}`); } 
-        else alert('All days already exist');
+        }
+        if (added > 0) {
+            await loadAllData();
+            loadAttendanceMatrix();
+            alert(`Added ${added} days for ${monthStr}`);
+        } else {
+            alert('All days already exist');
+        }
     });
 
-    document.getElementById('saveAttendanceMatrixBtn').addEventListener('click', () => {
+    document.getElementById('saveAttendanceMatrixBtn').addEventListener('click', async () => {
         const selects = document.querySelectorAll('.attendance-select');
+        const updates = {};
+        
         selects.forEach(sel => {
             const studentId = parseInt(sel.dataset.student);
             const date = sel.dataset.date;
             const status = sel.value;
-            const day = attendanceData.find(d => d.date === date);
-            if (day) day.records[studentId] = status;
+            
+            if (!updates[date]) {
+                const day = attendanceData.find(d => d.date === date);
+                updates[date] = day ? { ...day.records } : {};
+            }
+            updates[date][studentId] = status;
         });
-        saveAll();
+
+        for (const [date, records] of Object.entries(updates)) {
+            await supabaseClient
+                .from('attendanceData')
+                .upsert({ date, records }, { onConflict: 'date' });
+        }
+        
+        await loadAllData();
         alert('Attendance saved');
     });
 
-    // ---------- Final Grades ----------
+    // Final Grades
     function computeStudentAverages(studentId) {
         const studentDops = dopsEvals.filter(d => d.studentId === studentId);
         const avgDops = studentDops.length ? studentDops.reduce((sum, d) => sum + (d.grandTotal / 60 * 100), 0) / studentDops.length : 0;
@@ -722,22 +794,27 @@
         return { avgDops, avgMonthly, avgPres, attendancePct };
     }
 
-    function loadFinalGrades() {
+    async function loadFinalGrades() {
         const tbody = document.getElementById('finalGradesBody');
         tbody.innerHTML = '';
-        students.forEach(s => {
+        for (const s of students) {
             const user = users.find(u => u.id === s.userId);
-            if (!user) return;
+            if (!user) continue;
             const averages = computeStudentAverages(s.id);
             const { avgDops, avgMonthly, avgPres, attendancePct } = averages;
             const composite = (avgDops + avgMonthly + avgPres + attendancePct) / 4;
             const compositeWeighted = composite * 0.25;
+
             let finalGrade = finalGrades.find(f => f.studentId === s.id);
-            if (!finalGrade) { finalGrade = { studentId: s.id, examScore: 0, committeePoints: 0 }; finalGrades.push(finalGrade); }
+            if (!finalGrade) {
+                finalGrade = { studentId: s.id, examScore: 0, committeePoints: 0 };
+            }
+
             const exam = finalGrade.examScore || 0;
             const committee = finalGrade.committeePoints || 0;
             const finalPercent = compositeWeighted + exam + committee;
             let grade = finalPercent >= 85 ? 'Distinction' : (finalPercent >= 80 ? 'Good' : (finalPercent >= 70 ? 'Satisfactory' : 'Fail'));
+
             const row = tbody.insertRow();
             row.insertCell().innerText = `${user.firstName} ${user.lastName}`;
             row.insertCell().innerText = avgDops.toFixed(1) + '%';
@@ -745,27 +822,50 @@
             row.insertCell().innerText = avgPres.toFixed(1) + '%';
             row.insertCell().innerText = attendancePct.toFixed(1) + '%';
             row.insertCell().innerText = composite.toFixed(1) + '%';
-            const examCell = row.insertCell(); 
-            const examInput = document.createElement('input'); 
-            examInput.type = 'number'; examInput.value = exam; examInput.min = 0; examInput.max = 70; examInput.step = 0.1; examInput.className = 'border p-1 w-20'; 
-            examInput.onchange = () => { finalGrade.examScore = parseFloat(examInput.value) || 0; saveAll(); loadFinalGrades(); }; 
+            
+            const examCell = row.insertCell();
+            const examInput = document.createElement('input');
+            examInput.type = 'number';
+            examInput.value = exam;
+            examInput.min = 0;
+            examInput.max = 70;
+            examInput.step = 0.1;
+            examInput.className = 'border p-1 w-20';
+            examInput.onchange = async () => {
+                await supabaseClient
+                    .from('finalGrades')
+                    .upsert({ studentId: s.id, examScore: parseFloat(examInput.value) || 0, committeePoints: committee });
+                await loadAllData();
+                loadFinalGrades();
+            };
             examCell.appendChild(examInput);
-            const committeeCell = row.insertCell(); 
-            const committeeInput = document.createElement('input'); 
-            committeeInput.type = 'number'; committeeInput.value = committee; committeeInput.min = 0; committeeInput.max = 5; committeeInput.step = 0.1; committeeInput.className = 'border p-1 w-20'; 
-            committeeInput.onchange = () => { finalGrade.committeePoints = parseFloat(committeeInput.value) || 0; saveAll(); loadFinalGrades(); }; 
+            
+            const committeeCell = row.insertCell();
+            const committeeInput = document.createElement('input');
+            committeeInput.type = 'number';
+            committeeInput.value = committee;
+            committeeInput.min = 0;
+            committeeInput.max = 5;
+            committeeInput.step = 0.1;
+            committeeInput.className = 'border p-1 w-20';
+            committeeInput.onchange = async () => {
+                await supabaseClient
+                    .from('finalGrades')
+                    .upsert({ studentId: s.id, examScore: exam, committeePoints: parseFloat(committeeInput.value) || 0 });
+                await loadAllData();
+                loadFinalGrades();
+            };
             committeeCell.appendChild(committeeInput);
+            
             row.insertCell().innerText = finalPercent.toFixed(1) + '%';
             row.insertCell().innerText = grade;
-        });
+        }
     }
 
-    // ---------- Evaluator Dashboard (with photo update) ----------
+    // ---------- Evaluator Dashboard ----------
     function loadEvaluatorDashboard() {
         populateStudentSelect('studentSelect');
-        // Attach change listener to update photo
         document.getElementById('studentSelect').addEventListener('change', updateSelectedStudentPhoto);
-        // Initially, no student selected, so hide photo
         const photoImg = document.getElementById('selectedStudentPhoto');
         const noPhotoMsg = document.getElementById('noStudentPhotoMsg');
         photoImg.classList.add('hidden');
@@ -778,13 +878,11 @@
         const studentId = select.value;
         const photoImg = document.getElementById('selectedStudentPhoto');
         const noPhotoMsg = document.getElementById('noStudentPhotoMsg');
-        
         if (!studentId) {
             photoImg.classList.add('hidden');
             noPhotoMsg.classList.add('hidden');
             return;
         }
-        
         const student = students.find(s => s.id == studentId);
         if (student && student.photo) {
             photoImg.src = student.photo;
@@ -893,33 +991,43 @@
 
     document.getElementById('cancelDopsBtn').addEventListener('click', showSectionForRole);
 
-    document.getElementById('saveDopsBtn').addEventListener('click', () => {
+    document.getElementById('saveDopsBtn').addEventListener('click', async () => {
         const studentId = parseInt(document.getElementById('dopsStudentId').value);
         if (!studentId) return;
         const evaluator = evaluators.find(e => e.userId === currentUser.id);
         if (!evaluator) { alert('Evaluator profile not found'); return; }
+
         const pre = [1,2,3,4,5].map(i => parseInt(document.getElementById(`pre${i}`).value) || 0);
         const intra = [1,2,3,4,5,6,7,8,9,10,11,12,13].map(i => parseInt(document.getElementById(`intra${i}`).value) || 0);
         const post = [1,2].map(i => parseInt(document.getElementById(`post${i}`).value) || 0);
         const grandTotal = [...pre, ...intra, ...post].reduce((a,b)=>a+b,0);
         let competency = grandTotal >= 51 ? 'Competent to Perform Independently' : (grandTotal >= 40 ? 'Competent with Supervision' : 'Not Yet Competent');
+
         const newEval = {
-            id: dopsEvals.length+1,
-            studentId, evaluatorId: evaluator.id,
+            studentId,
+            evaluatorId: evaluator.id,
             date: document.getElementById('dopsDate').value,
             caseNo: document.getElementById('dopsCaseNo').value,
             type: document.getElementById('dopsType').value,
             indications: document.getElementById('dopsIndications').value,
-            preScores: pre, intraScores: intra, postScores: post,
-            grandTotal, competency,
+            preScores: pre,
+            intraScores: intra,
+            postScores: post,
+            grandTotal,
+            competency,
             comments: document.getElementById('dopsComments').value,
             evaluatorSignature: `${currentUser.firstName} ${currentUser.lastName}`,
             dateSigned: new Date().toISOString().split('T')[0]
         };
-        dopsEvals.push(newEval);
-        saveAll();
-        alert('DOPS saved');
-        showSectionForRole();
+
+        const { error } = await supabaseClient.from('dopsEvals').insert([newEval]);
+        if (error) {
+            alert('Error saving DOPS: ' + error.message);
+        } else {
+            await loadAllData();
+            alert('DOPS saved');
+            showSectionForRole();
+        }
     });
 
     // Start Monthly
@@ -935,32 +1043,40 @@
 
     document.getElementById('cancelMonthlyBtn').addEventListener('click', showSectionForRole);
 
-    document.getElementById('saveMonthlyBtn').addEventListener('click', () => {
+    document.getElementById('saveMonthlyBtn').addEventListener('click', async () => {
         const studentId = parseInt(document.getElementById('monthlyStudentId').value);
         if (!studentId) return;
         const evaluator = evaluators.find(e => e.userId === currentUser.id);
         if (!evaluator) { alert('Evaluator profile not found'); return; }
+
         const scoreInputs = ['comp1','comp2','comp3','comp4','comp5','comp6','comp7','comp8','comp9'];
         const scores = scoreInputs.map(name => {
             const selected = document.querySelector(`input[name="${name}"]:checked`);
             return selected ? parseInt(selected.value) : 0;
         });
         if (scores.includes(0) && !confirm('Some competencies missing. Continue?')) return;
+
         const newEval = {
-            id: monthlyEvals.length+1,
-            studentId, evaluatorId: evaluator.id,
+            studentId,
+            evaluatorId: evaluator.id,
             attachmentSite: document.getElementById('monthlySite').value,
             dateFrom: document.getElementById('monthlyFrom').value,
             dateTo: document.getElementById('monthlyTo').value,
-            scores, totalScore: scores.reduce((a,b)=>a+b,0),
+            scores,
+            totalScore: scores.reduce((a,b)=>a+b,0),
             comments: document.getElementById('monthlyComments').value,
             evaluatorSignature: `${currentUser.firstName} ${currentUser.lastName}`,
             date: new Date().toISOString().split('T')[0]
         };
-        monthlyEvals.push(newEval);
-        saveAll();
-        alert('Monthly saved');
-        showSectionForRole();
+
+        const { error } = await supabaseClient.from('monthlyEvals').insert([newEval]);
+        if (error) {
+            alert('Error saving Monthly: ' + error.message);
+        } else {
+            await loadAllData();
+            alert('Monthly saved');
+            showSectionForRole();
+        }
     });
 
     // Start Presentation
@@ -980,7 +1096,7 @@
 
     document.getElementById('cancelPresentationBtn').addEventListener('click', showSectionForRole);
 
-    document.getElementById('savePresentationBtn').addEventListener('click', () => {
+    document.getElementById('savePresentationBtn').addEventListener('click', async () => {
         const studentId = parseInt(document.getElementById('presentationStudentId').value);
         if (!studentId) return;
         const evaluator = evaluators.find(e => e.userId === currentUser.id);
@@ -1005,7 +1121,6 @@
         const totalScore = scores.reduce((sum, val) => sum + (val || 0), 0);
 
         const newEval = {
-            id: presentationEvals.length + 1,
             studentId,
             evaluatorId: evaluator.id,
             presenter: document.getElementById('presentationPresenter').value,
@@ -1019,13 +1134,18 @@
             evaluatorSignature: document.getElementById('presentationEvalSignature').value,
             dateSigned: new Date().toISOString().split('T')[0]
         };
-        presentationEvals.push(newEval);
-        saveAll();
-        alert('Presentation evaluation saved');
-        showSectionForRole();
+
+        const { error } = await supabaseClient.from('presentationEvals').insert([newEval]);
+        if (error) {
+            alert('Error saving Presentation: ' + error.message);
+        } else {
+            await loadAllData();
+            alert('Presentation evaluation saved');
+            showSectionForRole();
+        }
     });
 
-    // My Evaluations (Evaluator)
+    // My Evaluations
     function loadMyEvals() {
         const container = document.getElementById('myEvalsList');
         container.innerHTML = '';
@@ -1034,6 +1154,7 @@
         const myDops = dopsEvals.filter(d => d.evaluatorId === evaluator.id);
         const myMonthly = monthlyEvals.filter(m => m.evaluatorId === evaluator.id);
         const myPres = presentationEvals.filter(p => p.evaluatorId === evaluator.id);
+        
         if (myDops.length) {
             const div = document.createElement('div');
             div.innerHTML = '<h4 class="font-semibold">DOPS</h4>';
@@ -1072,14 +1193,13 @@
         }
     }
 
-    // ---------- Student Dashboard (with photo) ----------
+    // Student Dashboard
     function loadStudentDashboard() {
         const student = students.find(s => s.userId === currentUser.id);
         if (!student) { 
             document.getElementById('studentDops').innerText = 'No student profile'; 
             return; 
         }
-        // Photo
         const photoImg = document.getElementById('studentPhotoImg');
         const photoMissing = document.getElementById('studentPhotoMissing');
         if (student.photo) {
@@ -1117,7 +1237,7 @@
         document.getElementById('studentOverallGrade').innerHTML = `<strong>Final Grade:</strong> ${finalPercent.toFixed(1)}% (${grade})`;
     }
 
-    // PDF generation (unchanged)
+    // PDF generation
     async function generateDopsPDF(id) {
         const d = dopsEvals.find(x => x.id === id);
         if (!d) return;
@@ -1188,14 +1308,6 @@
         doc.save(`Presentation_${p.id}.pdf`);
     }
 
-    // Ensure finalGrades for all students
-    students.forEach(s => {
-        if (!finalGrades.find(f => f.studentId === s.id)) {
-            finalGrades.push({ studentId: s.id, examScore: 0, committeePoints: 0 });
-        }
-    });
-    saveAll();
+    // Initial load
+    loadAllData();
     showSection('loginSection');
-</script>
-</body>
-</html>
